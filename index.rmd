@@ -1,0 +1,496 @@
+---
+title: "Credit Risk"
+author: "Daniel Garcia"
+date: "2023-04-15"
+output:
+  html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### libraries
+```{r, warning=FALSE}
+library(tidyverse)
+library(tree)
+library(skimr)
+library(MASS)
+library(ROCR)
+library(randomForest)
+library(gbm)
+```
+
+
+#### Data
+```{r}
+# importing data 
+credit = read_csv("C:\\Users\\dgray\\OneDrive\\Stats\\Stat 473 Machine learning\\Data\\german_credit_data.csv")
+
+# observing data
+glimpse(credit)
+```
+
+```{r}
+unique(credit$`Saving accounts`)
+unique(credit$`Checking account`)
+```
+
+
+#### cleaning data
+```{r}
+colnames(credit)[c(1, 6, 7, 8)]= c("id", "Saving_accounts", "Checking_accounts", "Credit_amount")
+glimpse(credit)
+```
+
+
+
+```{r}
+# checking for NA values
+na.credit = credit[rowSums(is.na(credit))>0,]
+na.credit
+```
+```{r}
+sum(is.na(credit$Checking_accounts))
+sum(is.na(credit$Saving_accounts))
+
+```
+```{r}
+unique(credit$Checking_accounts)
+```
+
+
+
+\
+  
+  
+478 observations have NA values in at least 1 column. Without going through all observations, only savings accounts and checkings accounts columns are the only columns that produce NA's.  
+\
+
+* number of NA values in Saving_accounts column: 183
+* number of NA values in Checking_accounts column: 394
+\  
+* unique values in Saving accounts: NA, little, quite rich, rich, moderate.  
+\
+* unique values in Saving accounts: NA, little, rich, moderate. 
+
+
+**lets replace all NA values with "none"**  
+
+
+```{r}
+# replace NA values with "none"
+credit[is.na(credit)]="none"
+glimpse(credit)
+```
+
+```{r}
+df7=credit %>% 
+  filter(Saving_accounts=="none" | Checking_accounts=="none") 
+nrow(df7)
+df7 %>% 
+  filter(Risk=="good") %>% 
+  nrow()
+```
+\
+
+* 409/478 applicants who had NA values in Saving accounts or Checking accounts were identified as good risk clients
+
+
+
+
+
+\ 
+now that the data is clean, lets start Exploratory data analysis 
+
+```{r}
+# create training set and testing set
+n = nrow(credit)
+
+set.seed(1)
+Z = sample(n, size=n*0.8)
+
+train_set = credit[Z,]
+test_set=credit[-Z,]
+```
+
+
+
+
+#### EDA
+
+```{r}
+skim(credit)
+```
+
+* mean age is about 36
+* mean credit amount is about $3,270
+* mean duration is about 21 months
+
+
+```{r}
+sum(credit$Risk=="bad")/nrow(credit)
+```
+**30% of our data has credit risk classified as bad, 70% is good**
+
+```{r}
+ggplot(data=credit, mapping=aes(x=Risk)) +
+  geom_bar(fill="#CC9900", color="black") + 
+  labs(title="Distribution of our Target Variable (Risk)")
+```
+
+
+```{r}
+numerical_credit = credit %>% 
+  dplyr::select(2, 8, 9)
+GGally::ggpairs(numerical_credit)
+```
+
+
+* credit amount and duration have the highest correlations with respect to risk.
+
+
+
+```{r, warning=FALSE}
+ggplot(credit, aes(x=Sex, color=as.factor(Risk))) +
+  geom_bar(size=1.5, position="dodge") +
+  labs(title="Barplot By Sex", color="Risk")
+
+```
+\  
+
+* over 1/3 of loans to females result in bad loans.
+* around 1/4 of all loans to males result in bad loans.
+
+```{r}
+credit %>% 
+  filter(Sex=="male" & Risk=="good") %>% 
+  nrow()
+```
+```{r}
+credit %>% 
+  filter(Sex=="male" & Risk=="bad") %>% 
+  nrow()
+499/191
+```
+
+
+```{r}
+ggplot(credit, aes(x=Purpose, color=as.factor(Risk))) + 
+  geom_bar(size=1, position="dodge") +
+  labs(title="Barplot by Loan Purpose", color="Risk")
+```
+\  
+
+* although a lot of bad loans come from Cars, so too do a lot of good loans. 
+* Radio/TV purposes is second but the proportion size isnt that bad. 
+* Seems like nearly 1/3 of all loans for furnutire/equipment are bad loans.
+
+```{r, warning=FALSE}
+ggplot(credit, aes(x=Age)) +
+  geom_freqpoly(aes(col=Risk, y=..density..), size=0.75, bins=30) +
+  scale_colour_manual(values=c("coral4", "yellowgreen")) +
+  labs(title="Relationship Between Risk and Age")
+```
+\ 
+  
+
+* More bad credit risks typically come from younger ages (around 18-33)
+* Good credit risks typically come from middle aged groups (around 35-52)
+* No obvious visual insights for groups aged over 52
+
+
+```{r}
+ggplot(credit, aes(x=Risk, y=Duration, fill=Risk)) +
+  geom_boxplot() +
+  labs(title="Boxplot of the Duration of the Account")
+```
+\  
+
+* Duration on the account influences the Risk associated with the account. 
+* Short term loans are typically better
+
+
+```{r}
+ggplot(data=credit, mapping=aes(x=Purpose, y=Duration)) +
+  geom_boxplot(fill='#A4A4A4', color="black") + 
+  facet_wrap(~Risk, nrow=2) + 
+  labs(title="Boxplot of Credit Amount by Loan Purpose", y="Duration")
+```
+\  
+  
+  
+* Longer duration accounts are typically requested for vacation/other purposes and business purposes 
+
+
+### Modelling
+#### types of models:
+1. Logistic regression
+2. LDA 
+3. Random forest
+4. Bagging
+5. Boosting
+
+##### 1.
+
+**note: since reference is "good", we are predicting "bad" risk**
+```{r}
+# Logistic regression
+train_set$Risk = relevel(as.factor(train_set$Risk), ref="good")
+log_model = glm(Risk ~ Age + Sex + Job + Housing + Saving_accounts + 
+                  Checking_accounts + Credit_amount + Duration + Purpose, 
+                data=train_set, family="binomial")
+summary(log_model)
+```
+
+```{r}
+# rerun model with only significant predictors
+log_mod2 = glm(Risk ~ Age + Sex + Housing + Saving_accounts + 
+                  Checking_accounts + Duration , 
+                data=train_set, family="binomial")
+summary(log_mod2)
+```
+*INTERPRETATION:*
+
+
+
+
+
+
+
+```{r}
+log_pred = predict(log_mod2, newdata = test_set, type = "response")
+log_prob = ifelse(log_pred < 0.314, "good", "bad")
+log_conf_mat= table(predict_status=log_prob,
+                    true_status=test_set$Risk)
+log_conf_mat
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### 2.
+
+```{r}
+# LDA model
+lda_mod = lda(Risk ~ Age + Sex + Job + Housing + Saving_accounts + 
+                  Checking_accounts + Credit_amount + Duration + Purpose,
+              data=train_set)
+lda_mod
+```
+
+* prior probabilities:
+  $\hat{\pi}_{good} = 0.70875$ , $\hat{\pi}_{bad} = 0.29125$
+
+
+
+```{r}
+lda_pred_class = predict(lda_mod, newdata=test_set)$class
+lda_conf_mat = table(predict_status= lda_pred_class,
+                     true_status= test_set$Risk)
+lda_conf_mat
+```
+
+
+
+#### 3. 
+```{r}
+# random forest
+p=ncol(train_set) - 1
+set.seed(4)
+forest_model = randomForest(Risk ~., data=train_set, 
+                            mtry=round(sqrt(p)), importance=T)
+```
+
+
+```{r}
+rf.pred = predict(forest_model, test_set, type="class")
+forest_conf_mat = table(pred=rf.pred,
+                     true= test_set$Risk)
+forest_conf_mat
+```
+
+
+##### 4.
+```{r}
+# boosting model
+bag.df = credit %>% 
+  mutate(Sex = factor(Sex),
+         Housing= factor(Housing),
+         Saving_accounts = factor(Saving_accounts),
+         Checking_accounts = factor(Checking_accounts),
+         Purpose = factor(Purpose),
+         Risk= factor(ifelse(Risk=="good", 1, 0))) 
+bag.df = bag.df %>% 
+  dplyr::select(-id)
+
+# create training set and testing set
+n = nrow(bag.df)
+
+set.seed(1)
+Z = sample(n, size=n*0.8)
+
+bag.train = bag.df[Z,]
+bag.test=bag.df[-Z,]
+```
+
+
+```{r}
+# bagging model
+bag_fit = randomForest(Risk ~ ., data=bag.train,
+                       mtry=p, importance=TRUE)
+bag_fit
+```
+
+
+```{r}
+importance(bag_fit, type=2)
+```
+
+
+```{r}
+varImpPlot(bag_fit, main="Variable Importance (Bagging)")
+```
+
+
+```{r}
+yhat.test_bag = predict(bag_fit, bag.test, type="class")
+bag_conf_mat= table(pred=yhat.test_bag,
+                    true= bag.test$Risk)
+bag_conf_mat
+```
+
+
+
+#### What is our Goal for a model?
+
+**if the goal of our analysis is to minimize lending to people who are a bad credit risk and maximize lending to people who are a good credit risk, then the optimal solution would be to pick the model with the highest overall accuracy. Which model results in the highest overall accuracy?**
+
+
+
+
+#### Accuracy
+```{r}
+# accuracy for logistic model
+log_acc = sum(diag(log_conf_mat))/sum(log_conf_mat)
+log_acc
+```
+
+```{r}
+# accuracy for LDA model
+lda_acc = (lda_conf_mat[1,2] + lda_conf_mat[2,1])/sum(lda_conf_mat)
+lda_acc
+```
+
+
+```{r}
+# accuracy for random forest model
+forest_acc = (forest_conf_mat[1,2] + forest_conf_mat[2,1])/sum(forest_conf_mat)
+forest_acc
+```
+```{r}
+bag_acc = sum(diag(bag_conf_mat))/sum(bag_conf_mat)
+bag_acc
+```
+
+```{r}
+data.frame(cbind(log_acc, lda_acc, forest_acc, bag_acc))
+```
+
+
+#### Conclusion
+**Bagging model is the best model to maximize overall profit**
+
+
+
+
+
+
+**If the goal of our analysis is to prevent loss, then we might be concerned with the false positive rate. In other words, by picking the model with the lowest false positive rate we minimize the risk associated with giving loans to parties who are a bad risk.**
+
+#### False Positive rate
+```{r}
+lda_FPR = 1 - lda_conf_mat[2,1]/sum(lda_conf_mat[2,1], lda_conf_mat[1,1])
+lda_FPR
+```
+
+
+```{r}
+logistic_FPR = 1 - log_conf_mat[2,1]/(log_conf_mat[1,1]+log_conf_mat[2,1])
+logistic_FPR
+```
+
+```{r}
+forest_FPR = 1 - forest_conf_mat[2,1]/sum(forest_conf_mat[2,1], forest_conf_mat[1,1])
+forest_FPR
+```
+```{r}
+bag_FPR = 1-bag_conf_mat[1,1]/sum(bag_conf_mat[2,1], bag_conf_mat[1,1])
+```
+
+
+```{r}
+data.frame(cbind(lda_FPR, logistic_FPR, forest_FPR, bag_FPR))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
